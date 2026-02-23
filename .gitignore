@@ -9,3 +9,7 @@
 !**/contentfiles/**/*.dll
 
 /.vs
+bin/
+obj/
+*.user
+*.suo
