@@ -1,0 +1,300 @@
+@Library('SharedLib') _
+pipeline {
+	agent any
+	parameters{
+        booleanParam(name: 'UPLOADKRIGINGNUGET', defaultValue:false, description: 'Upload Kriging nuget package?')		
+        booleanParam(name: 'UPLOADKRIGINGSYMBOLNUGET', defaultValue:false, description: 'Upload Kriging Symbol nuget package?')		
+	}
+
+	  // using the Timestamper plugin we can add timestamps to the console log
+	  options {
+		timestamps()
+	  }
+
+	  environment {
+		SVN_REVISION_NUMBER = '50088' // FOR TESTING ONLY, Should be retrieved from source control
+		REPORTGENERATORVERSION ="5.0.0"
+		REPORTUNITVERSION = "1.2.1"
+		REPORTGENERATORDIR = "REPORTGENERATOR.${REPORTGENERATORVERSION}"
+		REPORTUNITDIR = "REPORTUNIT.${REPORTUNITVERSION}"
+		BuildConfiguration ="Release"
+		TARGET_FW = "netstandard2.0"
+		KrigingFolder = "Kriging_Trunk"
+		CUSTOM_WORKSPACE = "D:\\${KrigingFolder}"
+		BACKEND_WORKSPACE = "D:\\${KrigingFolder}\\Kriging"
+		AUTOBUILD_FOLDER = "D:\\Autobuilds\\${KrigingFolder}"
+		Nuget_Package_Version = "0.1.0"	
+		KrigingPackage = "SensArray.Kriging.${Nuget_Package_Version}.${SVN_REVISION_NUMBER}"
+	  }
+
+   stages {
+        stage("List env vars"){
+			steps{
+                bat 'set'
+			}
+		}
+        stage('Checkout') {
+            steps {
+                script {
+					try {                        
+                        ws(CUSTOM_WORKSPACE)
+                        { 
+                            def scmVars = checkout([$class: 'SubversionSCM', additionalCredentials: [], excludedCommitMessages: '', excludedRegions: '', excludedRevprop: '', excludedUsers: '', filterChangelog: false, ignoreDirPropChanges: false, includedRegions: '', locations: [[cancelProcessOnExternalsFail: true, credentialsId: 'c38ca794-1db2-4933-a3f5-c03a7a22caa7', depthOption: 'infinity', ignoreExternalsOption: true, local: '.', remote: 'https://sensarraysvn.adcorp.kla-tencor.com/svn/Nextgen/Kriging/Trunk']], quietOperation: true, workspaceUpdater: [$class: 'CheckoutUpdater']])                           
+
+                            SVN_REVISION_NUMBER = scmVars.SVN_REVISION
+							KrigingPackage = "SensArray.Kriging.${Nuget_Package_Version}.${SVN_REVISION_NUMBER}"
+
+                            echo "SVN_REVISION_NUMBER"
+                            echo SVN_REVISION_NUMBER
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        echo "Checkout Stage failed" + e.toString()
+                        sh 'EVEN_I_AM_INVALID_2_FAIL_THIS_BUILD!'
+                    }
+				}	//Script
+            }
+        }		
+		stage("Dotnet Check")
+		{
+		    steps
+		    {
+		        bat"""
+		        dotnet.exe --version
+		        """
+		        bat"""
+		        dotnet.exe --list-sdks
+		        """
+		    }
+		}
+		stage ("ReportGenerator and ReportUnit setup")
+		{
+		    steps
+		    {
+		        script{
+    		        ws("${BACKEND_WORKSPACE}")
+    				{
+    				    bat """
+    				    nuget install ReportGenerator -Version "${REPORTGENERATORVERSION}" 
+    					nuget install ReportUnit -Version "${REPORTUNITVERSION}"
+    					"""
+						bat"""
+						dotnet tool install dotnet-coverageconverter --version 0.0.5 --tool-path ${BACKEND_WORKSPACE}
+						"""
+    				}
+	            }
+		    }
+		}
+		stage("Restore solution")
+		{
+			steps{				
+				 script{
+					ws("${BACKEND_WORKSPACE}")
+					{
+						try {
+							bat"""
+							dotnet.exe restore ${BACKEND_WORKSPACE}\\SensArray.Kriging.sln
+							"""
+						}
+						catch (Exception e)
+						{
+							echo "Restore solution Stage failed" + e.toString()
+							sh 'EVEN_I_AM_INVALID_2_FAIL_THIS_BUILD!'
+						}
+					}
+				}
+			}
+		}
+		stage("Build Kriging Lib"){
+			steps{
+				script{
+					ws("${BACKEND_WORKSPACE}")
+					{
+						try {
+							bat"""					
+								cd /d ${BACKEND_WORKSPACE}
+								msbuild.exe ${BACKEND_WORKSPACE}\\SensArray.Kriging.targets -target:Rebuild /p:TargetFrameworks="${TARGET_FW}" /p:VersionRevision=${SVN_REVISION_NUMBER} /p:Configuration=${BuildConfiguration}
+								if %ERRORLEVEL% NEQ 0 exit %ERRORLEVEL%
+								echo "SensArray.kriging Build Success" 
+							"""	
+						}
+						catch (Exception e)
+						{
+							echo "Build Kriging Stage failed" + e.toString()
+							sh 'EVEN_I_AM_INVALID_2_FAIL_THIS_BUILD!'
+						}
+					}
+				}
+			}
+		}
+
+		stage("Test Kriging Lib"){
+			steps{
+				script{
+					ws("${BACKEND_WORKSPACE}")
+					{
+						try {
+							bat"""
+					 		cd /d ${BACKEND_WORKSPACE}
+					 	dotnet test SensArray.Kriging.Tests\\SensArray.Kriging.Tests.csproj --logger \"trx;LogFileName=Kriging.Tests.trx\" --configuration:Release --results-directory:\"${BACKEND_WORKSPACE}\\TestResult\" --collect:\"Code Coverage\" 
+						if %ERRORLEVEL% NEQ 0 exit %ERRORLEVEL%
+								echo "Test Kriging Lib success"
+
+							"""
+						}
+						catch (Exception e)
+						{
+							echo "Test Kriging Stage failed" + e.toString()
+							sh 'EVEN_I_AM_INVALID_2_FAIL_THIS_BUILD!'
+						}	
+					}
+				}
+			}
+		}
+
+		stage("Test Results")
+		{
+		    steps
+		    {
+		        script
+		        {
+		            ws("${CUSTOM_WORKSPACE}")
+				    {
+						try {
+							bat"""
+							dotnet-coverageconverter --CoverageFilesFolder "." 
+							"""
+
+							bat"""					
+							dotnet.exe ${BACKEND_WORKSPACE}\\${REPORTGENERATORDIR}\\tools\\net6.0\\ReportGenerator.dll "-reports:"${BACKEND_WORKSPACE}"\\*\\*\\*.coveragexml" "-targetdir:"${BACKEND_WORKSPACE}"\\coveragereport" "-assemblyfilters:-nunit3.*" "-reporttypes:Html;Cobertura"
+							"""
+
+							publishHTML([allowMissing: true, alwaysLinkToLastBuild: false, keepAll: true, reportDir: 'coveragereport', reportFiles: 'index.html', reportName: 'KrigingLib Coverage', reportTitles: ''])
+
+							bat"""
+							${BACKEND_WORKSPACE}\\${REPORTUNITDIR}\\tools\\ReportUnit.exe ${BACKEND_WORKSPACE}\\testresult\\
+							"""
+
+							publishHTML([allowMissing: false, alwaysLinkToLastBuild: false, includes: '**/*.html,**/*.css', keepAll: true, reportDir: 'testresult', reportFiles: 'Index.html', reportName: 'KrigingLig Unittest', reportTitles: ''])
+						}
+						catch (Exception e)
+						{
+							echo "Test Results Stage failed" + e.toString()
+							sh 'EVEN_I_AM_INVALID_2_FAIL_THIS_BUILD!'
+						}	
+				    }
+		        }
+		    }
+		}
+		stage('Copy to Autobuilds') {							
+			steps {
+				script {
+					try {				   
+						echo "Copy setups to authobuilds"
+						ws(BACKEND_WORKSPACE){
+						def now = new Date()
+						BuildDateAndTime= now.format("yyyyMMdd.HHmm", TimeZone.getTimeZone('UTC'))
+						bat"""						 
+						    XCOPY ${BACKEND_WORKSPACE}\\SensArray.Kriging\\bin\\Release\\ ${AUTOBUILD_FOLDER}\\${BuildDateAndTime}_${SVN_REVISION_NUMBER}\\SensArray.Kriging\\Binaries\\ /s /i /y 
+
+						    XCOPY ${BACKEND_WORKSPACE}\\SensArray.Kriging\\bin\\Release\\${KrigingPackage}.nupkg ${AUTOBUILD_FOLDER}\\${BuildDateAndTime}_${SVN_REVISION_NUMBER}\\ /s /i /y 
+
+						    XCOPY ${BACKEND_WORKSPACE}\\SensArray.Kriging\\bin\\Release\\${KrigingPackage}.snupkg ${AUTOBUILD_FOLDER}\\${BuildDateAndTime}_${SVN_REVISION_NUMBER}\\ /s /i /y 
+						"""
+						}
+					}
+					catch (Exception e)
+					{
+						echo "Copy setups to authobuilds Stage failed" + e.toString()
+						sh 'EVEN_I_AM_INVALID_2_FAIL_THIS_BUILD!'
+					}
+				}
+			}
+		}
+		stage('Upload Nuget Package') {
+			when {
+				environment name: 'UPLOADKRIGINGNUGET', value: 'true'
+			}
+			steps {
+				script {
+					try {
+						echo "${BACKEND_WORKSPACE}"
+                		def checkFileExist = "${BACKEND_WORKSPACE}\\SensArray.Kriging\\bin\\Release\\${KrigingPackage}.nupkg"
+                	
+                		if (fileExists(checkFileExist))
+                		{	
+						// Instead of using environment variable name must use package name like SensArray.Kriging.*.nupkg 
+						// due to the rtUpload should take what we defined in initially in env variable value. 
+						// rtUpload does not accept any changes in env variable value at runtime.
+						rtUpload (
+                                    serverId: 'artifactory',
+                                    spec: '''{
+                                        "files": [
+                                            {
+                								"pattern": "${BACKEND_WORKSPACE}\\SensArray.Kriging\\bin\\Release\\SensArray.Kriging.*.nupkg",
+                								"target": "common-sensarray-nuget-dev-f\\SensArray.Kriging\\"
+                                            }
+                                        ]
+                                    }'''
+                                )
+						}
+						else 
+                		{
+                			 echo "${KrigingPackage}" + ' File does not exists in the ' + "${BACKEND_WORKSPACE}\\SensArray.Kriging\\bin\\Release\\${KrigingPackage}.nupkg"
+                             sh 'EVEN_I_AM_INVALID_2_FAIL_THIS_BUILD!'							 
+                		} 
+					}
+					catch(Exception e)
+                	{
+                		echo "Artifactory uploading stage failed." + e.toString()
+                		sh 'EVEN_I_AM_INVALID_2_FAIL_THIS_BUILD!'
+                	}
+ 
+				}
+			}
+		}
+		stage('uploading Symbol Nuget to Artifactory') {
+			when {
+				environment name: 'UPLOADKRIGINGSYMBOLNUGET', value: 'true'
+			}
+            steps {
+                echo"uploading Symbol Nuget to Artifactory"
+                script {
+                    try {
+                        bat"""
+                            cd /d ${BACKEND_WORKSPACE}\\SensArray.Kriging\\bin\\Release\\
+                            IF EXIST "${KrigingPackage}.snupkg" (nuget push "${KrigingPackage}.snupkg" -source artifactorysymbol) ELSE (echo "File not exists" +"${KrigingPackage}.snupkg")
+                        """
+                    }//try
+                    catch (Exception e)
+                    {
+                        echo "uploading Symbol Nuget to Artifactory Stage failed" + e.toString()
+                        sh 'EVEN_I_AM_INVALID_2_FAIL_THIS_BUILD!'
+                    }
+                }//Script
+            }//symbol step
+        }
+		stage('Build Limit') {
+			steps {
+				script {
+					echo "Limiting the builds"
+					BuildLimitAutobuilds(AUTOBUILD_FOLDER)
+				}
+			}
+		}//Build Limit end	
+	}
+	post {
+	   always {
+		   script
+		   {
+				SendFailureEmail()
+		   } //script end
+	   } // always end
+
+ 
+
+	}  //post end  
+}
+
+
