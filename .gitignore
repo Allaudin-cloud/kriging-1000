@@ -1,0 +1,11 @@
+# Ignore ALL 
+**/bin
+**/obj
+ 
+# Allow ThirdParty DLLs
+!**/ThirdParty/**/*.dll
+
+# Allow contentfiles DLLs
+!**/contentfiles/**/*.dll
+
+/.vs
